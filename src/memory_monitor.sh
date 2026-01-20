@@ -51,32 +51,40 @@ usage() {
 
 # 获取系统内存 (返回: RAM_MB SWAP_MB)
 get_system_memory() {
-    # 1. 获取 Swap Used (sysctl vm.swapusage 返回如: vm.swapusage: total = 0.00M  used = 0.00M  free = 0.00M  (encrypted))
-    # 注意：sysctl 输出可能包含 M, G 等单位，这里做一个简单的处理，假设 macOS 通常返回 M
+    # 1. 获取 Swap Used - 使用更健壮的解析方式
+    # sysctl vm.swapusage 输出格式: vm.swapusage: total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)
     local swap_info=$(sysctl vm.swapusage)
-    local swap_used=$(echo "$swap_info" | awk '{print $7}' | sed 's/M//')
-    # 如果单位是 G，简单乘以 1024 (这里只是简单示例，生产环境可能需要更复杂的单位转换)
-    if [[ "$swap_info" == *"G"* ]] && [[ "$swap_used" != *"M"* ]]; then 
-         # 这里 awk 逻辑可能需要根据实际输出调整，暂按标准 MB 处理
-         : 
+    local swap_used_raw=$(echo "$swap_info" | grep -oE "used = [0-9.]+[MG]" | awk '{print $3}')
+
+    # 提取数值和单位
+    local swap_value=$(echo "$swap_used_raw" | grep -oE "[0-9.]+")
+    local swap_unit=$(echo "$swap_used_raw" | grep -oE "[MG]")
+
+    # 转换为 MB
+    local swap_used=0
+    if [ -n "$swap_value" ]; then
+        if [ "$swap_unit" == "G" ]; then
+            # 使用 awk 进行浮点数运算: GB -> MB
+            swap_used=$(echo "$swap_value * 1024" | awk '{printf "%.0f", $1 * $3}')
+        else
+            # 单位是 M 或无单位，转换为整数
+            swap_used=$(echo "$swap_value" | awk '{printf "%.0f", $1}')
+        fi
     fi
-    # 修正：vm.swapusage 输出格式固定，但单位可能变。为简化，我们只提取数字部分，假设它是 MB。
-    # 更严谨的做法是看 sysctl -n vm.swapusage
-    
+
     # 2. 获取 RAM (使用 vm_stat)
     local vm_stats=$(vm_stat)
-    local page_size=4096 
-    # 获取 pages
+    local page_size=4096
+    # 获取 pages - 移除末尾的点号
     local pages_active=$(echo "$vm_stats" | grep "Pages active" | awk '{print $3}' | sed 's/\.//')
-    local pages_wired=$(echo "$vm_stats" | grep "Pages wired down" | awk '{print $3}' | sed 's/\.//')
+    local pages_wired=$(echo "$vm_stats" | grep "Pages wired down" | awk '{print $4}' | sed 's/\.//')
     local pages_compressed=$(echo "$vm_stats" | grep "Pages occupied by compressor" | awk '{print $5}' | sed 's/\.//')
-    
+
     # 计算已用 RAM (Active + Wired + Compressed)
     # 注意：macOS 内存管理复杂，这里取一个近似值作为 "Used"
     local total_pages=$(( pages_active + pages_wired + pages_compressed ))
     local ram_mb=$(( total_pages * page_size / 1024 / 1024 ))
-    
-    # Swap 直接取 vm.swapusage 的 used 值
+
     echo "$ram_mb $swap_used"
 }
 
@@ -104,6 +112,13 @@ get_process_memory() {
 # 初始化
 init() {
     if [ -n "$1" ]; then
+        # 验证 PID 是否为有效数字
+        if [[ ! "$1" =~ ^[0-9]+$ ]]; then
+            echo "错误: PID 必须是正整数。"
+            echo ""
+            usage
+        fi
+
         MODE="PROCESS"
         TARGET_PID=$1
         echo "初始化: 正在监控进程 PID=$TARGET_PID ..."
@@ -113,7 +128,7 @@ init() {
             exit 1
         fi
         INITIAL_RAM=$(echo $mem | awk '{print $1}')
-        INITIAL_SWAP=$(echo $mem | awk '{print $2}')
+        INITIAL_SWAP=$(echo $mem | awk '{print $2}')  # 注意：这里实际是 VSZ
     else
         MODE="SYSTEM"
         echo "初始化: 正在监控系统内存 ..."
