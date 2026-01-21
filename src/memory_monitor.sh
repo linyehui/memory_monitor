@@ -195,7 +195,21 @@ init() {
     echo ""
     echo ""
     echo "------------------------------------------------------------"
-    echo "按 Ctrl+C 退出"
+    echo "按 ESC 键退出"
+}
+
+# 检查键盘输入（非阻塞）
+check_key_input() {
+    local key
+    # Bash 3.2 不支持小数超时，使用 1 秒
+    # 但我们在主循环中每次 sleep 之前都会调用，所以响应够快
+    if read -rsn1 -t 1 key 2>/dev/null; then
+        # 检查是否是 ESC 键（ASCII 27）
+        if [ "$key" = $'\x1b' ]; then
+            return 0  # ESC 键被按下
+        fi
+    fi
+    return 1  # 没有按 ESC
 }
 
 # 主循环
@@ -204,9 +218,15 @@ run() {
     
     # 隐藏光标
     tput civis
-    
-    # 捕获 Ctrl+C 恢复光标
-    trap 'tput cnorm; echo ""; exit' INT
+
+    # 保存原始终端设置
+    local old_tty_settings=$(stty -g)
+
+    # 设置终端：禁用回显，但保持规范模式以便 read 正常工作
+    stty -echo
+
+    # 捕获 Ctrl+C 和退出信号，恢复终端设置
+    trap 'stty "$old_tty_settings"; tput cnorm; echo ""; exit' INT TERM EXIT
     
     while true; do
         local current_ram=0
@@ -219,6 +239,7 @@ run() {
                 # 然后在第11行（第4行数据）显示提示
                 tput cup 11 0
                 printf "${CLEAR_LINE}${RED}进程 $TARGET_PID ($PROCESS_NAME) 已结束。监控停止。${NC}\n"
+                stty "$old_tty_settings"
                 tput cnorm
                 exit 0
             fi
@@ -285,8 +306,18 @@ run() {
         # 打印增量行 (显示时长)
         tput cup 10 0
         printf "${CLEAR_LINE}%-10s ${ram_color}%-15s${NC} %-15s %-20s\n" "内存增量" "${diff_ram_fmt}" "${diff_swap_fmt}" "$elapsed_str"
-        
-        sleep $INTERVAL
+
+        # 分段 sleep，每次检查按键（提高响应速度）
+        local sleep_count=0
+        while [ $sleep_count -lt $INTERVAL ]; do
+            if check_key_input; then
+                stty "$old_tty_settings"
+                tput cnorm
+                echo ""
+                exit 0
+            fi
+            sleep_count=$((sleep_count + 1))
+        done
     done
 }
 
