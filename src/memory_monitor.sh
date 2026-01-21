@@ -15,6 +15,7 @@ INITIAL_RAM=0
 INITIAL_SWAP=0
 MODE="" # "SYSTEM" 或 "PROCESS"
 TARGET_PID=""
+PROCESS_NAME=""
 START_TIME_EPOCH=0
 START_TIME_STR=""
 
@@ -88,6 +89,38 @@ get_system_memory() {
     echo "$ram_mb $swap_used"
 }
 
+# 获取进程名称
+get_process_name() {
+    local pid=$1
+    # 使用 ps -o command 获取完整命令
+    local full_cmd=$(ps -p $pid -o command= 2>/dev/null)
+    if [ -z "$full_cmd" ]; then
+        echo "unknown"
+        return
+    fi
+
+    # 提取第一个参数（可执行文件路径）
+    local exec_path=$(echo "$full_cmd" | awk '{print $1}')
+
+    # 如果是 .app 应用，尝试从 Info.plist 获取应用名称
+    if [[ "$exec_path" == *".app/"* ]]; then
+        # 提取 .app 路径
+        local app_path=$(echo "$exec_path" | grep -o '.*\.app' | head -1)
+        if [ -n "$app_path" ]; then
+            # 使用 plutil 读取 CFBundleName（会自动根据系统语言返回本地化名称，且正确处理中文）
+            local bundle_name=$(plutil -extract CFBundleName raw "$app_path/Contents/Info.plist" 2>/dev/null)
+            if [ -n "$bundle_name" ]; then
+                echo "$bundle_name"
+                return
+            fi
+        fi
+    fi
+
+    # 如果无法获取应用名称，使用 basename 作为回退方案
+    local process_name=$(basename "$exec_path")
+    echo "$process_name"
+}
+
 # 获取进程内存 (返回: RAM_MB VSZ_MB)
 get_process_memory() {
     local pid=$1
@@ -121,7 +154,8 @@ init() {
 
         MODE="PROCESS"
         TARGET_PID=$1
-        echo "初始化: 正在监控进程 PID=$TARGET_PID ..."
+        PROCESS_NAME=$(get_process_name $TARGET_PID)
+        echo "初始化: 正在监控进程 PID=$TARGET_PID ($PROCESS_NAME) ..."
         local mem=$(get_process_memory $TARGET_PID)
         if [ "$mem" == "Error" ]; then
             echo "错误: 进程 $TARGET_PID 未找到。"
@@ -147,7 +181,7 @@ init() {
     echo "                macOS 内存监控器 (Memory Monitor)"
     echo "============================================================"
     if [ "$MODE" == "PROCESS" ]; then
-        echo "监控对象: 进程 PID $TARGET_PID"
+        echo "监控对象: 进程 PID $TARGET_PID ($PROCESS_NAME)"
     else
         echo "监控对象: 系统整体 (System)"
     fi
@@ -181,8 +215,10 @@ run() {
         if [ "$MODE" == "PROCESS" ]; then
             local mem=$(get_process_memory $TARGET_PID)
             if [ "$mem" == "Error" ]; then
-                tput cup 10 0
-                echo "${RED}进程 $TARGET_PID 已结束。监控停止。${NC}"
+                # 进程已结束，先显示最后一次的增量信息（使用上一次循环的数据）
+                # 然后在第11行（第4行数据）显示提示
+                tput cup 11 0
+                printf "${CLEAR_LINE}${RED}进程 $TARGET_PID ($PROCESS_NAME) 已结束。监控停止。${NC}\n"
                 tput cnorm
                 exit 0
             fi
